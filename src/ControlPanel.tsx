@@ -1,46 +1,50 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { db } from './firebase';
 import { ref, push, set, onValue } from 'firebase/database';
-// RECUERDA EJECUTAR: npm install @imgly/background-removal
-import { removeBackground } from "@imgly/background-removal";
 
 export default function ControlPanel() {
-  // --- ESTADOS ---
+  // ESTADOS FORMULARIO
   const [myCarId, setMyCarId] = useState<string | null>(null);
   const [name, setName] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [flipImage, setFlipImage] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [loadingText, setLoadingText] = useState('');
 
-  // --- ESTADOS DE EDICIÓN ---
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
-  const [points, setPoints] = useState<{x: number, y: number}[]>([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [isCut, setIsCut] = useState(false); // Si ya se recortó
-
-  // --- ESTADOS JUEGO ---
+  // ESTADOS MINIJUEGO
   const [gameActive, setGameActive] = useState(false);
   const [timeLeft, setTimeLeft] = useState(5);
   const [clicks, setClicks] = useState(0);
   const [gameFinished, setGameFinished] = useState(false);
 
-  // ESCUCHAR ESTADO (Para resetear al terminar carrera)
+  // ESCUCHAR ESTADO DE CARRERA (Para saber cuándo resetearse)
   useEffect(() => {
-    if (!myCarId) return;
+    if (!myCarId) return; // Solo escuchamos si ya enviamos el auto
+
     const activeRaceRef = ref(db, 'active_race');
     const unsubscribe = onValue(activeRaceRef, (snapshot) => {
-      if (!snapshot.exists()) setTimeout(() => resetForm(), 4000);
+      // Si active_race se vuelve null (la carrera terminó), nos reseteamos
+      if (snapshot.exists()) {
+          // Estamos corriendo...
+      } else {
+          // La carrera terminó o no existe.
+          // Si yo ya había enviado mi auto (tengo ID) y ya no hay carrera, me reseteo.
+          // Pequeño timeout para dejar ver el resultado en la pantalla grande
+          setTimeout(() => {
+             resetForm();
+          }, 2000);
+      }
     });
     return () => unsubscribe();
   }, [myCarId]);
 
   const resetForm = () => {
-    setMyCarId(null); setName(''); setOriginalImage(null);
-    setIsCut(false); setPoints([]); setLoading(false);
+    setMyCarId(null); setName(''); setSelectedFile(null);
+    setPreview(null); setFlipImage(false); setLoading(false);
     setClicks(0); setGameFinished(false); setTimeLeft(5);
   };
 
-  // MINIJUEGO CLICKS
+  // LOGICA MINIJUEGO
   useEffect(() => {
     let interval: number;
     if (gameActive && timeLeft > 0) {
@@ -52,281 +56,173 @@ export default function ControlPanel() {
     return () => clearInterval(interval);
   }, [gameActive, timeLeft]);
 
-  const startGame = () => { if (!gameFinished) { setClicks(0); setTimeLeft(5); setGameActive(true); } };
-  const handleClick = (e: any) => { if(e.cancelable) e.preventDefault(); if (gameActive) setClicks(p => p + 1); };
+  const startGame = () => {
+    if (gameFinished) return;
+    setClicks(0); setTimeLeft(5); setGameActive(true);
+  };
 
-  // --- LÓGICA DE IMAGEN ---
+  const handleClick = (e: React.MouseEvent | React.TouchEvent) => {
+    if (e.cancelable) e.preventDefault();
+    if (gameActive) setClicks(p => p + 1);
+  };
+
+  // LOGICA IMAGEN
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-            setOriginalImage(img);
-            setIsCut(false);
-            setPoints([]);
-        };
-        img.src = event.target?.result as string;
-      };
-      reader.readAsDataURL(e.target.files[0]);
+      const file = e.target.files[0];
+      setSelectedFile(file);
+      setPreview(URL.createObjectURL(file));
     }
   };
 
-  // PINTAR IMAGEN EN CANVAS
-  useEffect(() => {
-    if (originalImage && canvasRef.current && !isCut) {
-        const canvas = canvasRef.current;
+  const processImage = (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.src = URL.createObjectURL(file);
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 400;
+        const scale = MAX_WIDTH / img.width; 
+        canvas.width = MAX_WIDTH;
+        canvas.height = img.height * scale;
         const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        const displayWidth = 350; // Ancho para móviles
-        const scale = displayWidth / originalImage.width;
-        canvas.width = displayWidth;
-        canvas.height = originalImage.height * scale;
-
-        ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height);
-    }
-  }, [originalImage, isCut]);
-
-  // --- DIBUJO DE LAZO ---
-  const getCoords = (e: any) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return {x:0, y:0};
-      const rect = canvas.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      return { x: clientX - rect.left, y: clientY - rect.top };
+        if(ctx) {
+          ctx.save();
+          if (flipImage) { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+        }
+        resolve(canvas.toDataURL('image/png', 0.8));
+      };
+    });
   };
 
-  const startDrawing = (e: any) => {
-      if (isCut || !originalImage) return;
-      setIsDrawing(true);
-      setPoints([getCoords(e)]);
-  };
-
-  const draw = (e: any) => {
-      if (!isDrawing || isCut || !canvasRef.current || !originalImage) return;
-      if(e.cancelable) e.preventDefault(); 
-
-      const newPoint = getCoords(e);
-      const currentPoints = [...points, newPoint];
-      setPoints(currentPoints);
-
-      const ctx = canvasRef.current.getContext('2d');
-      if (!ctx) return;
-
-      // Limpiar y redibujar imagen
-      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-      ctx.drawImage(originalImage, 0, 0, ctx.canvas.width, ctx.canvas.height);
-      
-      // Dibujar línea guía verde
-      ctx.beginPath();
-      ctx.strokeStyle = '#00FF00'; 
-      ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
-      ctx.moveTo(currentPoints[0].x, currentPoints[0].y);
-      currentPoints.forEach(p => ctx.lineTo(p.x, p.y));
-      ctx.stroke();
-  };
-
-  const stopDrawing = () => setIsDrawing(false);
-
-  // --- PROCESAMIENTO INTELIGENTE (LAZO + IA) ---
-  const applySmartCut = async () => {
-      if (!canvasRef.current || points.length < 10 || !originalImage) return alert("Dibuja un círculo alrededor del auto.");
-      
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      setLoading(true);
-      setLoadingText("🤖 IA analizando tu recorte...");
-
-      try {
-          // 1. CREAR MÁSCARA MANUAL (Recorte burdo)
-          const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = canvas.width;
-          tempCanvas.height = canvas.height;
-          const tempCtx = tempCanvas.getContext('2d');
-          
-          if (!tempCtx) throw new Error("No context");
-
-          // Aplicar recorte de usuario al canvas temporal
-          tempCtx.beginPath();
-          tempCtx.moveTo(points[0].x, points[0].y);
-          points.forEach(p => tempCtx.lineTo(p.x, p.y));
-          tempCtx.closePath();
-          tempCtx.clip();
-          tempCtx.drawImage(originalImage, 0, 0, canvas.width, canvas.height);
-
-          // 2. OBTENER BLOB DE LA IMAGEN PRE-RECORTADA
-          const roughBlob = await new Promise<Blob | null>(r => tempCanvas.toBlob(r, 'image/png'));
-          
-          if (roughBlob) {
-              // 3. PASAR A LA IA PARA REFINAR BORDES
-              // Usamos CDN para evitar problemas de carga de assets locales
-              const config = {
-                  publicPath: "https://static.imgly.com/lib/background-removal-data/"
-              };
-              
-              const imageBlob = await removeBackground(roughBlob, config);
-              const cleanUrl = URL.createObjectURL(imageBlob);
-
-              // 4. PINTAR RESULTADO FINAL
-              const finalImg = new Image();
-              finalImg.onload = () => {
-                  ctx.clearRect(0, 0, canvas.width, canvas.height);
-                  ctx.drawImage(finalImg, 0, 0, canvas.width, canvas.height);
-                  setIsCut(true);
-                  setLoading(false);
-              };
-              finalImg.src = cleanUrl;
-          }
-      } catch (error) {
-          console.error(error);
-          alert("Error en IA. Intenta dibujar mejor.");
-          setLoading(false);
-      }
-  };
-
-  const resetCut = () => {
-      setIsCut(false); setPoints([]);
-  };
-
-  // --- ENVIAR ---
-  const handleSubmit = async () => {
-    if (!name || !gameFinished || !canvasRef.current || !isCut) return alert("¡Completa todos los pasos!");
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name || !selectedFile || !gameFinished) return alert("¡Termina el minijuego y llena datos!");
     setLoading(true);
-    setLoadingText("Subiendo...");
     try {
-      const finalImage = canvasRef.current.toDataURL('image/png');
+      const imageBase64 = await processImage(selectedFile);
       const waitingRef = ref(db, 'waiting_room');
       const newCarRef = push(waitingRef);
       const newId = newCarRef.key;
-      setMyCarId(newId);
+      setMyCarId(newId); // Marca que ya estamos dentro
 
       await set(newCarRef, {
         id: newId,
         name: name.toUpperCase().substring(0, 12),
         level: '1',
-        clicks: clicks,
-        image: finalImage,
+        clicks: clicks, // Mandamos los clicks iniciales
+        image: imageBase64,
         timestamp: Date.now()
       });
     } catch (error) { console.error(error); setLoading(false); }
   };
 
   // --- VISTAS ---
+
+  // 1. MODO ESPECTADOR (Cuando ya envié mi auto)
   if (myCarId) {
       return (
         <div className="fixed inset-0 bg-neutral-900 z-50 flex flex-col items-center justify-center p-6 text-center">
-            <div className="text-8xl mb-6 animate-bounce">🏎️</div>
-            <h1 className="text-orange-500 font-black text-4xl mb-4">LISTO</h1>
-            <p className="text-white text-xl">Tu auto espera en la pista.</p>
+            <div className="text-8xl mb-6 animate-pulse">👀</div>
+            <h1 className="text-orange-500 font-black text-4xl mb-4">ENVIADO</h1>
+            <p className="text-white text-xl">Tu auto está en la pantalla grande.</p>
+            <div className="mt-8 p-4 bg-gray-800 rounded-xl">
+                <p className="text-gray-400 text-sm">POTENCIA GENERADA</p>
+                <p className="text-yellow-400 text-4xl font-mono font-bold">{clicks} Clicks</p>
+            </div>
+            <p className="text-gray-500 text-xs mt-10">Tu celular se reiniciará al acabar la carrera.</p>
         </div>
       );
   }
 
+  // 2. MODO JUEGO ACTIVO (PANTALLA ROJA)
   if (gameActive) {
     return (
       <div className="fixed inset-0 bg-red-600 z-50 flex flex-col items-center justify-center touch-none select-none overflow-hidden"
            onMouseDown={handleClick} onTouchStart={handleClick}>
-         <h2 className="text-yellow-300 font-black text-[12vw] animate-bounce mb-4 uppercase leading-none">¡DALE!</h2>
-         <div className="bg-white text-red-600 rounded-full w-[60vw] h-[60vw] flex items-center justify-center shadow-2xl active:scale-90 transition-transform border-4 border-red-800">
-            <span className="text-[20vw] font-black">{clicks}</span>
+         <h2 className="text-yellow-300 font-black text-[8vw] animate-bounce mb-4 uppercase text-center px-2 leading-none">
+           ¡DALE GAS!
+         </h2>
+         <p className="text-white font-bold text-lg mb-8 animate-pulse">TOCA LA PANTALLA RÁPIDO</p>
+         <div className="bg-white text-red-600 rounded-full w-[50vw] h-[50vw] max-w-[250px] max-h-[250px] flex items-center justify-center shadow-[0_0_50px_rgba(255,255,255,0.5)] active:scale-90 transition-transform">
+            <span className="text-[15vw] font-black">{clicks}</span>
          </div>
-         <p className="text-white mt-8 font-mono text-4xl font-bold">{timeLeft}s</p>
+         <p className="text-white mt-8 font-mono text-2xl font-bold">{timeLeft}s</p>
       </div>
     );
   }
 
+  // 3. FORMULARIO NORMAL
   return (
     <div className="fixed inset-0 bg-neutral-900 flex flex-col w-full h-full font-sans">
-      <div className="flex-none bg-neutral-900 p-3 text-center border-b border-gray-800 z-10">
-        <h1 className="text-2xl font-black text-orange-600 italic tracking-tighter transform -skew-x-6">TALLER SMART</h1>
+      <div className="flex-none bg-neutral-900 p-4 pb-2 text-center border-b border-gray-800 z-10 shadow-md">
+        <h1 className="text-3xl font-black text-orange-600 italic tracking-tighter transform -skew-x-6">TALLER RACING</h1>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-5 w-full max-w-md mx-auto">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-5 flex flex-col gap-6 w-full max-w-lg mx-auto">
         
-        {/* 1. NOMBRE */}
-        <div className="bg-neutral-800 p-3 rounded-xl border border-neutral-700">
+        {/* NOMBRE */}
+        <div className="w-full">
           <label className="text-xs font-bold text-orange-500 uppercase ml-1 mb-1 block">1. PILOTO</label>
-          <input value={name} onChange={e => setName(e.target.value)} className="w-full p-3 bg-neutral-900 rounded-lg text-white font-bold text-lg outline-none border-2 border-transparent focus:border-orange-600 text-center" placeholder="Nombre" maxLength={10}/>
+          <input 
+            value={name} onChange={e => setName(e.target.value)}
+            className="w-full p-4 bg-neutral-800 rounded-xl text-white font-bold text-xl outline-none border-2 border-transparent focus:border-orange-600 transition-colors placeholder-gray-600"
+            placeholder="Tu nombre..."
+            maxLength={12}
+          />
         </div>
 
-        {/* 2. RECORTE INTELIGENTE */}
-        <div className="bg-neutral-800 p-3 rounded-xl border border-neutral-700">
-          <label className="text-xs font-bold text-orange-500 uppercase ml-1 mb-2 block flex justify-between">
-              <span>2. RECORTE (Lazo + IA)</span>
-              {isCut && <span className="text-green-500 text-[10px] bg-green-900/30 px-2 py-1 rounded">✅ Listo</span>}
-          </label>
-          
-          {!originalImage ? (
-            <label className="flex h-44 flex-col items-center justify-center w-full border-2 border-neutral-600 border-dashed rounded-xl bg-neutral-900/50 active:bg-neutral-800 transition-colors cursor-pointer">
-               <span className="text-3xl mb-1">📸</span>
-               <span className="text-sm text-gray-300 font-bold uppercase">Subir Foto</span>
+        {/* FOTO */}
+        <div className="w-full">
+          <label className="text-xs font-bold text-orange-500 uppercase ml-1 mb-1 block">2. VEHÍCULO</label>
+          {!preview ? (
+            <label className="flex min-h-[150px] flex-col items-center justify-center w-full border-2 border-neutral-700 border-dashed rounded-xl bg-neutral-800/50 hover:bg-neutral-800 transition-colors">
+               <span className="text-4xl mb-2">📸</span>
+               <span className="text-sm text-gray-400 font-bold uppercase">Subir Foto</span>
                <input type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
             </label>
           ) : (
-            <div className="flex flex-col gap-3 items-center">
-               {!isCut && <p className="text-xs text-gray-400 text-center">Dibuja un círculo "más o menos" alrededor del auto.</p>}
-               
-               <div className="relative border-2 border-orange-500/50 rounded-lg overflow-hidden bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')] touch-none">
-                  <canvas 
-                    ref={canvasRef}
-                    onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing}
-                    onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing}
-                    className={`touch-none ${isCut ? 'cursor-default' : 'cursor-crosshair'}`}
-                  />
-                  {loading && (
-                      <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-10">
-                          <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-orange-500 mb-2"></div>
-                          <span className="text-xs text-orange-400 animate-pulse">{loadingText}</span>
-                      </div>
-                  )}
+            <div className="w-full flex flex-col gap-3">
+               <div className="relative w-full h-[200px] bg-black/40 rounded-xl overflow-hidden border border-neutral-700">
+                  <img src={preview} className={`w-full h-full object-contain transition-transform duration-300 ${flipImage ? 'scale-x-[-1]' : ''}`} />
+                  <button onClick={() => { setSelectedFile(null); setPreview(null); }} className="absolute top-2 right-2 bg-red-600 text-white rounded-full w-8 h-8 font-bold flex items-center justify-center z-20">✕</button>
                </div>
-
-               <div className="flex gap-2 w-full">
-                   {!isCut ? (
-                     <button onClick={applySmartCut} disabled={points.length < 10 || loading}
-                        className={`flex-1 py-3 font-bold rounded-lg shadow-lg transition-all flex items-center justify-center gap-2 ${points.length < 10 ? 'bg-neutral-600 text-gray-400' : 'bg-blue-600 text-white active:scale-95'}`}>
-                        ✂️ RECORTE INTELIGENTE
-                     </button>
-                   ) : (
-                     <button onClick={resetCut} className="flex-1 py-3 bg-neutral-700 text-gray-300 font-bold rounded-lg active:bg-neutral-600">
-                        ↺ Reintentar
-                     </button>
-                   )}
-                   <button onClick={() => setOriginalImage(null)} className="px-4 py-2 bg-red-900/50 text-red-200 rounded-lg font-bold border border-red-900/30">🗑️</button>
-               </div>
+               <button type="button" onClick={() => setFlipImage(!flipImage)} className="w-full py-3 bg-neutral-800 rounded-xl font-bold text-gray-300 border border-neutral-700">🔄 Voltear</button>
             </div>
           )}
         </div>
 
-        {/* 3. MOTOR */}
-        <div className="bg-neutral-800 p-3 rounded-xl border border-neutral-700 pb-4">
-           <label className="text-xs font-bold text-orange-500 uppercase ml-1 mb-2 block flex justify-between">
-              <span>3. MOTOR</span>
-              {gameFinished && <span className="text-green-500 text-[10px] bg-green-900/30 px-2 py-1 rounded">✅ Potencia Lista</span>}
-           </label>
+        {/* POTENCIA (MINIJUEGO) */}
+        <div className="w-full pb-20">
+           <label className="text-xs font-bold text-orange-500 uppercase ml-1 mb-1 block">3. MOTOR</label>
            {!gameFinished ? (
-               <button onClick={startGame} className="w-full py-5 bg-gradient-to-r from-purple-700 to-blue-600 rounded-xl font-black text-xl shadow-lg active:scale-95 text-white flex flex-col items-center">
+               <button 
+                  type="button" onClick={startGame}
+                  className="w-full py-5 bg-blue-600 rounded-xl font-black text-xl shadow-lg active:scale-95 transition-transform text-white flex flex-col items-center justify-center gap-1">
                   <span>AFINAR MOTOR ⚡</span>
+                  <span className="text-xs font-normal opacity-80">Minijuego de 5 segundos</span>
                </button>
            ) : (
-               <div className="w-full bg-green-900/20 border-2 border-green-500/50 rounded-xl p-4 flex items-center justify-between">
-                   <div><span className="text-green-400 text-xs font-bold uppercase block">Potencia:</span><span className="text-white font-black text-3xl">{clicks} CLICKS</span></div>
-                   <button onClick={() => { setGameFinished(false); setClicks(0); }} className="bg-neutral-700 p-2 rounded-full text-gray-300">↺</button>
+               <div className="w-full bg-green-900/30 border border-green-600 rounded-xl p-4 flex items-center justify-between">
+                   <div>
+                       <div className="text-green-400 text-xs font-bold uppercase">Potencia Lista</div>
+                       <div className="text-white font-black text-2xl">{clicks} CLICKS</div>
+                   </div>
+                   <button onClick={() => { setGameFinished(false); setClicks(0); }} className="text-gray-400 text-xs underline">Repetir</button>
                </div>
            )}
         </div>
-        <div className="h-20"></div>
       </div>
 
-      <div className="flex-none p-4 bg-neutral-900 border-t border-gray-800 z-20 shadow-[0_-5px_15px_rgba(0,0,0,0.5)]">
-        <button onClick={handleSubmit} disabled={loading || !name || !isCut || !gameFinished}
-          className={`w-full py-4 rounded-xl font-black text-2xl tracking-wide shadow-lg transition-all ${loading || !name || !isCut || !gameFinished ? 'bg-neutral-700 text-gray-500' : 'bg-orange-600 text-white active:scale-[0.98]'}`}>
-          {loading ? loadingText : '🏁 A LA PISTA'}
+      <div className="flex-none p-5 bg-neutral-900 border-t border-gray-800 w-full max-w-lg mx-auto z-20">
+        <button 
+          onClick={handleSubmit}
+          disabled={loading || !name || !selectedFile || !gameFinished}
+          className={`w-full py-5 rounded-2xl font-black text-xl tracking-wide shadow-lg transition-all ${loading || !name || !selectedFile || !gameFinished ? 'bg-neutral-800 text-gray-600' : 'bg-gradient-to-r from-orange-600 to-red-600 text-white active:scale-[0.98]'}`}
+        >
+          {loading ? 'ENVIANDO...' : '🏁 ENTRAR A PISTA'}
         </button>
       </div>
     </div>
