@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getDatabase } from "firebase/database";
 
+// Configuración de Firebase
 const firebaseConfig = {
   apiKey: "AIzaSyCXkwkxXmqkb1Ioy5YHKKSzEfm8xGUf6Dc",
   authDomain: "autos-215e5.firebaseapp.com",
