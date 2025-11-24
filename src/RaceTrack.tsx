@@ -1,24 +1,20 @@
 import { useEffect, useState, useRef } from 'react';
 import { db } from './firebase';
-import { ref, onValue, remove, set, get } from 'firebase/database';
+import { ref, onValue, remove, set } from 'firebase/database';
 import { QRCodeSVG } from 'qrcode.react';
 
-type Car = { id: string; name: string; image: string; level: string; clicks: number; sessionClicks?: number };
+type Car = { id: string; name: string; image: string; level: string; clicks: number; };
 
 export default function RaceTrack() {
   const [racers, setRacers] = useState<Car[]>([]);
   const [isRacing, setIsRacing] = useState(false);
   
-  // ESTADOS JUEGO
-  const [scores, setScores] = useState({ p1: 0, p2: 0 });
-  const [round, setRound] = useState(1);
+  // ESTADOS DE CARRERA
   const [winner, setWinner] = useState<string | null>(null);
-  const [seriesWinner, setSeriesWinner] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<string | null>(null);
-  const [pitStopTimer, setPitStopTimer] = useState<number | null>(null);
 
-  // HISTORIAL
-  const [history, setHistory] = useState<Car[]>([]);
+  // HISTORIAL (Tabla de resultados)
+  const [history, setHistory] = useState<{winner: Car, loser: Car}[]>([]);
   
   const car1Ref = useRef<HTMLDivElement>(null);
   const car2Ref = useRef<HTMLDivElement>(null);
@@ -28,7 +24,6 @@ export default function RaceTrack() {
 
   // 1. ESCUCHAR SALA DE ESPERA
   useEffect(() => {
-    // SI ESTAMOS CORRIENDO, NO ESCUCHAMOS LA SALA DE ESPERA (EVITA EL BORRADO ACCIDENTAL)
     if (isRacing) return;
 
     const waitingRef = ref(db, 'waiting_room');
@@ -41,101 +36,94 @@ export default function RaceTrack() {
         setRacers(carList);
 
         if (carList.length >= 2) {
-          startSeries(carList[0], carList[1]);
+          startRaceSequence(carList[0], carList[1]);
         }
       } else {
         setRacers([]);
       }
     });
     return () => unsubscribe();
-  }, [isRacing]); // Al cambiar isRacing, se desconecta/conecta este efecto
+  }, [isRacing]);
 
-  // 2. INICIAR SERIE
-  const startSeries = async (carA: Car, carB: Car) => {
-    // 1. BLOQUEAR VISTA INMEDIATAMENTE
+  // 2. INICIAR SECUENCIA
+  const startRaceSequence = async (carA: Car, carB: Car) => {
     setIsRacing(true);
-    // 2. FIJAR LOS CORREDORES LOCALMENTE (Para que no se borren al limpiar Firebase)
-    setRacers([carA, carB]);
+    setRacers([carA, carB]); // Fijar corredores localmente
 
-    // 3. LIMPIAR FIREBASE (Waiting Room)
+    // Limpiar Firebase para que no entren otros mientras corren estos
     remove(ref(db, `waiting_room/${carA.id}`)).catch(() => {});
     remove(ref(db, `waiting_room/${carB.id}`)).catch(() => {});
 
-    // 4. INICIALIZAR CARRERA ACTIVA (Para los teléfonos)
-    const activeRaceRef = ref(db, 'active_race');
-    await set(activeRaceRef, {
-      p1: carA,
-      p2: carB,
-      status: 'RACING', 
-      round: 1
+    // Avisar a los teléfonos que estamos corriendo (para que muestren pantalla de "Corriendo")
+    // Usamos 'active_race' solo como señal visual, no lógica compleja
+    set(ref(db, 'active_race'), { 
+        p1: carA.id, 
+        p2: carB.id, 
+        status: 'RACING' 
     });
 
-    setScores({ p1: 0, p2: 0 });
-    setRound(1);
-    setSeriesWinner(null);
-    
-    startRound(carA, carB);
-  };
-
-  const startRound = (carA: Car, carB: Car) => {
-    set(ref(db, 'active_race/status'), 'RACING');
-
+    // Resetear posiciones
     car1Pos.current = 0;
     car2Pos.current = 0;
     setWinner(null);
-
-    // Reset visual
     if (car1Ref.current) car1Ref.current.style.transform = `translateX(0vw)`;
     if (car2Ref.current) car2Ref.current.style.transform = `translateX(0vw)`;
 
+    // Cuenta regresiva
     let count = 3;
-    setCountdown(`RONDA ${round}`);
+    setCountdown("3");
     
-    setTimeout(() => {
-        const timer = setInterval(() => {
-            if (count > 0) setCountdown(String(count));
-            else if (count === 0) setCountdown("GO!");
-            else {
-                clearInterval(timer);
-                setCountdown(null);
-                runEngine(carA, carB);
-            }
-            count--;
-        }, 800);
-    }, 1500);
+    const timer = setInterval(() => {
+      count--;
+      if (count > 0) setCountdown(String(count));
+      else if (count === 0) setCountdown("GO!");
+      else {
+        clearInterval(timer);
+        setCountdown(null);
+        runEngine(carA, carB);
+      }
+    }, 1000);
   };
 
-  const runEngine = async (carA: Car, carB: Car) => {
-    const snapshot = await get(ref(db, 'active_race'));
-    const raceData = snapshot.val();
-    
-    const clicksA = (raceData?.p1?.clicks || 0) + (raceData?.p1?.sessionClicks || 0);
-    const clicksB = (raceData?.p2?.clicks || 0) + (raceData?.p2?.sessionClicks || 0);
+  // 3. MOTOR DE FÍSICA (Basado en los Clicks iniciales)
+  const runEngine = (carA: Car, carB: Car) => {
+    const clicksA = carA.clicks || 0;
+    const clicksB = carB.clicks || 0;
 
+    // Cálculo de Probabilidad
+    // Si tienes más clicks, tienes más probabilidad, pero siempre hay factor suerte (10%)
     let totalClicks = clicksA + clicksB;
     if (totalClicks === 0) totalClicks = 1;
 
-    const probA = (clicksA / totalClicks) + 0.1;
-    const winnerIndex = Math.random() < probA ? 0 : 1;
+    const probA = (clicksA / totalClicks); 
+    // Ejemplo: Si A tiene 80 clicks y B tiene 20. A tiene 80% chance.
+    
+    // Factor suerte: Aunque tengas pocos clicks, puedes ganar (pequeña chance)
+    const winnerIsA = Math.random() < probA ? true : (Math.random() < 0.5); // Si la prob falla, tiramos moneda
 
-    let speedA = 0.35 + (clicksA * 0.01); 
-    let speedB = 0.35 + (clicksB * 0.01);
+    // Velocidades base
+    let speedA = 0.3 + (clicksA * 0.005); // Los clicks dan velocidad base
+    let speedB = 0.3 + (clicksB * 0.005);
 
-    if (winnerIndex === 0) speedA += 0.2; else speedB += 0.2;
+    // El ganador predestinado recibe un turbo extra invisible
+    if (winnerIsA) speedA += 0.15;
+    else speedB += 0.15;
 
     const animate = () => {
       if (!car1Ref.current || !car2Ref.current) return;
+
       car1Pos.current += speedA;
       car2Pos.current += speedB;
 
       car1Ref.current.style.transform = `translateX(${car1Pos.current}vw)`;
       car2Ref.current.style.transform = `translateX(${car2Pos.current}vw)`;
 
+      // Meta en 85% de la pantalla
       if (car1Pos.current >= 85 || car2Pos.current >= 85) {
         cancelAnimationFrame(raceLoop.current!);
         const wName = car1Pos.current > car2Pos.current ? carA.name : carB.name;
-        const wIndex = car1Pos.current > car2Pos.current ? 0 : 1;
-        handleRoundEnd(wName, wIndex);
+        
+        finishRace(wName, carA, carB, car1Pos.current > car2Pos.current);
       } else {
         raceLoop.current = requestAnimationFrame(animate);
       }
@@ -143,109 +131,75 @@ export default function RaceTrack() {
     raceLoop.current = requestAnimationFrame(animate);
   };
 
-  const handleRoundEnd = (winnerName: string, winnerIndex: number) => {
+  const finishRace = (winnerName: string, carA: Car, carB: Car, aWon: boolean) => {
     setWinner(winnerName);
-    const newScores = { ...scores };
-    if (winnerIndex === 0) newScores.p1 += 1; else newScores.p2 += 1;
-    setScores(newScores);
 
+    // Guardar en historial
+    const resultEntry = {
+        winner: aWon ? carA : carB,
+        loser: aWon ? carB : carA
+    };
+    setHistory(prev => [resultEntry, ...prev].slice(0, 5)); // Guardar últimos 5
+
+    // Esperar 8 segundos celebrando y reiniciar
     setTimeout(() => {
-        if (newScores.p1 >= 2 || newScores.p2 >= 2) {
-            setSeriesWinner(winnerName);
-            const finalP1 = { ...racers[0], clicks: (racers[0].clicks || 0) }; 
-            const finalP2 = { ...racers[1], clicks: (racers[1].clicks || 0) };
-            
-            setHistory(prev => [finalP1, finalP2, ...prev].slice(0, 5));
-            
-            setTimeout(() => { 
-                remove(ref(db, 'active_race')); 
-                setIsRacing(false); 
-                setRacers([]); 
-            }, 8000);
-
-        } else {
-            triggerPitStop();
-        }
-    }, 3000);
+        setIsRacing(false);
+        setRacers([]);
+        remove(ref(db, 'active_race')); // Liberar teléfonos
+    }, 8000);
   };
 
-  const triggerPitStop = () => {
-    set(ref(db, 'active_race/status'), 'PIT_STOP');
-    set(ref(db, 'active_race/p1/sessionClicks'), 0);
-    set(ref(db, 'active_race/p2/sessionClicks'), 0);
-
-    let pitTime = 5;
-    setPitStopTimer(pitTime);
-
-    const pitInterval = setInterval(() => {
-        pitTime--;
-        setPitStopTimer(pitTime);
-        if (pitTime <= 0) {
-            clearInterval(pitInterval);
-            setPitStopTimer(null);
-            setRound(prev => prev + 1);
-            startRound(racers[0], racers[1]); 
-        }
-    }, 1000);
-  };
-
-  // --- SAFEGUARD: PANTALLA DE CARGA SI NO HAY DATOS ---
-  // Esto evita el "pantallazo blanco" si racers se vacía por error
-  const isLoadingRace = isRacing && racers.length < 2;
-
-  if (isLoadingRace) {
-      return (
-        <div className="w-screen h-screen bg-black flex items-center justify-center">
-            <h1 className="text-orange-500 animate-pulse font-black text-4xl">INICIANDO MOTORES...</h1>
-        </div>
-      );
-  }
-
-  // --- VISTA LOBBY ---
+  // --- VISTA LOBBY (SALA DE ESPERA) ---
   if (!isRacing) {
     const p1 = racers[0];
-    const qrUrl = "https://autos-plum.vercel.app/";
+    const qrUrl = "https://autos-plum.vercel.app/"; // TU URL
 
     return (
       <div className="w-screen h-screen bg-black flex items-center border-y-4 border-orange-600 px-4 overflow-hidden relative font-sans">
          <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
 
-         <div className="z-10 w-[40%] h-[90%] flex mr-4">
-            <div className={`flex-grow h-full flex items-center bg-gray-900 border border-orange-500 rounded-l-lg p-2 gap-2 shadow-lg overflow-hidden ${!p1 ? 'justify-center' : ''}`}>
+         {/* IZQUIERDA: P1 + QR */}
+         <div className="z-10 w-[45%] h-[90%] flex mr-4">
+            <div className={`flex-grow h-full flex items-center bg-gray-900 border border-orange-500 rounded-l-lg p-2 gap-4 shadow-lg overflow-hidden ${!p1 ? 'justify-center' : ''}`}>
                {p1 ? (
                  <>
                    <img src={p1.image} className="h-full w-auto max-w-[50%] object-contain bg-black/50 rounded flex-shrink-0" />
                    <div className="flex flex-col justify-center h-full min-w-0">
-                      <span className="text-orange-500 font-bold text-[10px] uppercase tracking-widest leading-none mb-1">Retador</span>
-                      <h1 className="text-white font-black text-xl uppercase leading-none truncate">{p1.name}</h1>
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className="text-gray-400 font-mono text-xs bg-gray-800 px-1 rounded">NVL {p1.level}</span>
+                      <span className="text-orange-500 font-bold text-[10px] uppercase tracking-widest leading-none mb-1">Retador 1</span>
+                      <h1 className="text-white font-black text-2xl uppercase leading-none truncate">{p1.name}</h1>
+                      <div className="flex items-center gap-2 mt-2">
+                         <span className="text-yellow-400 font-mono text-sm font-bold border border-yellow-600 px-2 rounded bg-yellow-900/30">⚡ {p1.clicks} POTENCIA</span>
                       </div>
                    </div>
                  </>
                ) : (
-                  <div className="text-gray-500 font-bold animate-pulse text-lg">ESPERANDO J1...</div>
+                  <div className="text-gray-500 font-bold animate-pulse text-lg tracking-widest">ESPERANDO JUGADOR 1...</div>
                )}
             </div>
             <div className="h-full bg-white p-2 flex flex-col items-center justify-center rounded-r-lg border-l-2 border-gray-200 min-w-[100px]">
-               <QRCodeSVG value={qrUrl} size={80} />
-               <p className="text-black text-[9px] font-bold mt-1 uppercase text-center leading-none">Escanea<br/>para jugar</p>
+               <QRCodeSVG value={qrUrl} size={90} />
+               <p className="text-black text-[10px] font-bold mt-1 uppercase text-center leading-none">Escanea<br/>para jugar</p>
             </div>
          </div>
 
-         <div className="z-10 w-[25%] h-[90%] flex flex-col bg-gray-900/50 border border-gray-700 rounded-lg p-2 mr-4 overflow-hidden">
-             <h3 className="text-gray-400 text-[10px] font-bold uppercase tracking-widest border-b border-gray-700 pb-1 mb-1 text-center">Salón de la Fama</h3>
-             {history.length === 0 ? <div className="h-full flex items-center justify-center text-gray-600 text-xs italic">Sin registros</div> : (
-                 <div className="flex flex-col gap-1 w-full">
-                     {history.slice(0, 5).map((car, idx) => (
-                         <div key={idx} className="flex items-center justify-between bg-black/40 p-1 rounded px-2">
-                             <span className="text-white text-xs font-bold truncate">{car.name}</span>
+         {/* CENTRO: TABLA DE GANADORES */}
+         <div className="z-10 w-[20%] h-[90%] flex flex-col bg-gray-900/80 border border-gray-700 rounded-lg p-2 mr-4 overflow-hidden backdrop-blur-sm">
+             <h3 className="text-gray-400 text-[10px] font-bold uppercase tracking-widest border-b border-gray-700 pb-1 mb-1 text-center">Últimos Ganadores</h3>
+             {history.length === 0 ? (
+                 <div className="h-full flex items-center justify-center text-gray-600 text-xs italic">Nadie ha corrido hoy</div>
+             ) : (
+                 <div className="flex flex-col gap-1 w-full overflow-y-auto">
+                     {history.map((entry, idx) => (
+                         <div key={idx} className="flex flex-col bg-black/40 p-1 rounded border-l-2 border-green-500">
+                             <span className="text-white text-xs font-bold truncate">🏆 {entry.winner.name}</span>
+                             <span className="text-gray-500 text-[9px] truncate">vs {entry.loser.name}</span>
                          </div>
                      ))}
                  </div>
              )}
          </div>
 
+         {/* DERECHA: P2 (VACÍO) */}
          <div className="z-10 flex-grow h-[90%] flex items-center justify-center border-2 border-gray-800 border-dashed rounded-lg bg-gray-900/30">
             <div className="text-gray-600 font-bold animate-pulse text-lg tracking-widest text-center px-2">ESPERANDO RIVAL</div>
          </div>
@@ -254,59 +208,58 @@ export default function RaceTrack() {
   }
 
   // --- VISTA CARRERA ---
-  // AQUI ES DONDE OCURRÍA EL ERROR: SI racers[0] NO EXISTÍA, CRASHEABA.
-  // AHORA TENEMOS EL SAFEGUARD 'isLoadingRace' ARRIBA QUE LO EVITA.
   return (
     <div className="relative w-screen h-screen bg-neutral-900 overflow-hidden border-y-4 border-orange-600 flex flex-col">
        <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle,_#333_1px,_transparent_1px)] [background-size:20px_20px]"></div>
+
+       {/* CARRIL 1 (P1) - Protegido con racer[0] */}
+       <div className="relative h-1/2 w-full border-b border-dashed border-gray-600 flex items-end">
+         <div ref={car1Ref} className="absolute left-0 h-[85%] w-auto will-change-transform z-10 pl-2 pb-1">
+            {racers[0] && (
+               <>
+                 <img src={racers[0].image} className="h-full w-auto object-contain drop-shadow-2xl" />
+                 <div className="absolute -top-2 left-2 bg-orange-600 text-white text-[10px] font-black px-2 py-0.5 rounded-sm skew-x-[-10deg] shadow-lg whitespace-nowrap max-w-[200px] truncate">
+                    {racers[0].name}
+                 </div>
+               </>
+            )}
+         </div>
+       </div>
+
+       {/* CARRIL 2 (P2) - Protegido con racer[1] */}
+       <div className="relative h-1/2 w-full flex items-end">
+         <div ref={car2Ref} className="absolute left-0 h-[85%] w-auto will-change-transform z-10 pl-2 pb-1">
+            {racers[1] && (
+               <>
+                 <img src={racers[1].image} className="h-full w-auto object-contain drop-shadow-2xl" />
+                 <div className="absolute -top-2 left-2 bg-blue-600 text-white text-[10px] font-black px-2 py-0.5 rounded-sm skew-x-[-10deg] shadow-lg whitespace-nowrap max-w-[200px] truncate">
+                    {racers[1].name}
+                 </div>
+               </>
+            )}
+         </div>
+       </div>
+
+       {/* META */}
+       <div className="absolute right-[15%] top-0 bottom-0 w-10 bg-[repeating-linear-gradient(45deg,#fff,#fff_15px,#000_15px,#000_30px)] opacity-80 z-0 shadow-[0_0_20px_rgba(0,0,0,0.8)]"></div>
        
-       {pitStopTimer && (
-          <div className="absolute inset-0 z-40 bg-red-600/90 flex flex-col items-center justify-center animate-pulse">
-             <h1 className="text-yellow-300 font-black text-[15vh] uppercase leading-none">¡BOOST!</h1>
-             <h2 className="text-white font-bold text-4xl mt-2">PICA TU TELÉFONO AHORA</h2>
-             <div className="text-[10vh] font-mono font-bold text-white mt-4">{pitStopTimer}s</div>
-          </div>
+       {/* CUENTA REGRESIVA */}
+       {countdown && (
+           <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm">
+               <h1 className="text-white font-black animate-ping drop-shadow-[0_0_10px_orange]" style={{ fontSize: '15vh' }}>{countdown}</h1>
+           </div>
        )}
-
-       <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-0 opacity-30 text-[10vh] font-black text-white flex gap-10">
-        <span>{scores.p1}</span><span>-</span><span>{scores.p2}</span>
-      </div>
-
-      {/* CARRIL 1 - PROTEGIDO CON OPTIONAL CHAINING (?.) */}
-      <div className="relative h-1/2 w-full border-b border-dashed border-gray-600 flex items-end">
-        <div ref={car1Ref} className="absolute left-0 h-[85%] w-auto will-change-transform z-10 pl-2 pb-1">
-           {racers[0] && (
-             <>
-               <img src={racers[0].image} className="h-full w-auto object-contain drop-shadow-2xl" />
-               <div className="absolute -top-1 left-2 bg-orange-600/90 text-white text-[10px] font-bold px-2 rounded-sm skew-x-[-10deg] whitespace-nowrap overflow-hidden max-w-[150px] truncate">
-                  {racers[0].name} {scores.p1>=1 && '★'}
+       
+       {/* GANADOR FINAL */}
+       {winner && (
+           <div className="absolute inset-0 bg-gradient-to-r from-orange-900/90 to-black/90 flex flex-col items-center justify-center z-50 animate-in fade-in duration-300">
+               <h2 className="text-yellow-400 text-3xl font-black tracking-[0.5em] mb-4 drop-shadow-lg uppercase">Ganador</h2>
+               <div className="bg-white text-black font-black px-12 py-4 text-6xl transform skew-x-[-15deg] border-4 border-orange-500 shadow-[0_0_60px_rgba(255,165,0,0.6)]">
+                   {winner}
                </div>
-             </>
-           )}
-        </div>
-      </div>
-
-      {/* CARRIL 2 - PROTEGIDO CON OPTIONAL CHAINING (?.) */}
-      <div className="relative h-1/2 w-full flex items-end">
-        <div ref={car2Ref} className="absolute left-0 h-[85%] w-auto will-change-transform z-10 pl-2 pb-1">
-           {racers[1] && (
-             <>
-                <img src={racers[1].image} className="h-full w-auto object-contain drop-shadow-2xl" />
-                <div className="absolute -top-1 left-2 bg-blue-600/90 text-white text-[10px] font-bold px-2 rounded-sm skew-x-[-10deg] whitespace-nowrap overflow-hidden max-w-[150px] truncate">
-                   {racers[1].name} {scores.p2>=1 && '★'}
-                </div>
-             </>
-           )}
-        </div>
-      </div>
-
-      <div className="absolute right-[15%] top-0 bottom-0 w-8 bg-[repeating-linear-gradient(45deg,#fff,#fff_10px,#000_10px,#000_20px)] opacity-60 z-0"></div>
-      
-      {countdown && <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm"><h1 className="text-orange-500 font-black animate-ping drop-shadow-md text-center leading-none" style={{ fontSize: '10vh' }}>{countdown}</h1></div>}
-      
-      {winner && !seriesWinner && !pitStopTimer && <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-50"><h2 className="text-white text-lg font-bold tracking-widest uppercase">Ganador Ronda {round}</h2><div className="text-orange-500 font-black text-6xl transform -rotate-2">{winner}</div></div>}
-      
-      {seriesWinner && <div className="absolute inset-0 bg-gradient-to-r from-orange-900 to-black flex flex-col items-center justify-center z-50 animate-pulse"><h2 className="text-yellow-400 text-2xl font-black tracking-[0.5em] mb-2 drop-shadow-lg">REY DE LA PISTA</h2><div className="bg-white text-black font-black px-8 py-2 text-5xl transform skew-x-[-15deg] border-4 border-orange-500 shadow-[0_0_50px_rgba(255,165,0,0.8)]">{seriesWinner}</div></div>}
+               <p className="text-white mt-4 font-mono animate-pulse">Reiniciando sistema...</p>
+           </div>
+       )}
     </div>
   );
 }
