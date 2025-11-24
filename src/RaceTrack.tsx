@@ -3,7 +3,6 @@ import { db } from './firebase';
 import { ref, onValue, remove, set, get } from 'firebase/database';
 import { QRCodeSVG } from 'qrcode.react';
 
-// Agregamos 'sessionClicks' para los clicks de la ronda actual
 type Car = { id: string; name: string; image: string; level: string; clicks: number; sessionClicks?: number };
 
 export default function RaceTrack() {
@@ -16,7 +15,7 @@ export default function RaceTrack() {
   const [winner, setWinner] = useState<string | null>(null);
   const [seriesWinner, setSeriesWinner] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<string | null>(null);
-  const [pitStopTimer, setPitStopTimer] = useState<number | null>(null); // TIEMPO PARA CLICKEAR
+  const [pitStopTimer, setPitStopTimer] = useState<number | null>(null);
 
   // HISTORIAL
   const [history, setHistory] = useState<Car[]>([]);
@@ -27,8 +26,9 @@ export default function RaceTrack() {
   const car2Pos = useRef(0);
   const raceLoop = useRef<number>();
 
-  // 1. ESCUCHAR SALA DE ESPERA (Solo si no hay carrera activa)
+  // 1. ESCUCHAR SALA DE ESPERA
   useEffect(() => {
+    // SI ESTAMOS CORRIENDO, NO ESCUCHAMOS LA SALA DE ESPERA (EVITA EL BORRADO ACCIDENTAL)
     if (isRacing) return;
 
     const waitingRef = ref(db, 'waiting_room');
@@ -48,42 +48,43 @@ export default function RaceTrack() {
       }
     });
     return () => unsubscribe();
-  }, [isRacing]);
+  }, [isRacing]); // Al cambiar isRacing, se desconecta/conecta este efecto
 
-  // 2. INICIAR SERIE (BEST OF 3)
+  // 2. INICIAR SERIE
   const startSeries = async (carA: Car, carB: Car) => {
+    // 1. BLOQUEAR VISTA INMEDIATAMENTE
     setIsRacing(true);
-    
-    // Quitamos de sala de espera
+    // 2. FIJAR LOS CORREDORES LOCALMENTE (Para que no se borren al limpiar Firebase)
+    setRacers([carA, carB]);
+
+    // 3. LIMPIAR FIREBASE (Waiting Room)
     remove(ref(db, `waiting_room/${carA.id}`)).catch(() => {});
     remove(ref(db, `waiting_room/${carB.id}`)).catch(() => {});
 
-    // INICIALIZAMOS LA CARRERA ACTIVA EN FIREBASE PARA LOS TELÉFONOS
+    // 4. INICIALIZAR CARRERA ACTIVA (Para los teléfonos)
     const activeRaceRef = ref(db, 'active_race');
     await set(activeRaceRef, {
       p1: carA,
       p2: carB,
-      status: 'RACING', // Estado inicial
+      status: 'RACING', 
       round: 1
     });
 
-    setRacers([carA, carB]);
     setScores({ p1: 0, p2: 0 });
     setRound(1);
     setSeriesWinner(null);
     
-    // Arrancamos Ronda 1 directo
     startRound(carA, carB);
   };
 
   const startRound = (carA: Car, carB: Car) => {
-    // Avisamos a Firebase que estamos corriendo (Bloquea botones en tels)
     set(ref(db, 'active_race/status'), 'RACING');
 
     car1Pos.current = 0;
     car2Pos.current = 0;
     setWinner(null);
 
+    // Reset visual
     if (car1Ref.current) car1Ref.current.style.transform = `translateX(0vw)`;
     if (car2Ref.current) car2Ref.current.style.transform = `translateX(0vw)`;
 
@@ -105,26 +106,21 @@ export default function RaceTrack() {
   };
 
   const runEngine = async (carA: Car, carB: Car) => {
-    // 1. OBTENER CLICKS ACTUALIZADOS DE FIREBASE (LO QUE CLICKEARON EN EL PIT STOP)
     const snapshot = await get(ref(db, 'active_race'));
     const raceData = snapshot.val();
     
-    // Sumamos los clicks base + los de la sesión actual
     const clicksA = (raceData?.p1?.clicks || 0) + (raceData?.p1?.sessionClicks || 0);
     const clicksB = (raceData?.p2?.clicks || 0) + (raceData?.p2?.sessionClicks || 0);
 
-    // DETERMINAR GANADOR BASADO EN CLICKS Y AZAR
-    // Más clicks = Más probabilidad y velocidad base
     let totalClicks = clicksA + clicksB;
-    if (totalClicks === 0) totalClicks = 1; // Evitar division por 0
+    if (totalClicks === 0) totalClicks = 1;
 
-    const probA = (clicksA / totalClicks) + 0.1; // Base de suerte
+    const probA = (clicksA / totalClicks) + 0.1;
     const winnerIndex = Math.random() < probA ? 0 : 1;
 
-    let speedA = 0.35 + (clicksA * 0.01); // Cada click da velocidad
+    let speedA = 0.35 + (clicksA * 0.01); 
     let speedB = 0.35 + (clicksB * 0.01);
 
-    // Boost al ganador determinado
     if (winnerIndex === 0) speedA += 0.2; else speedB += 0.2;
 
     const animate = () => {
@@ -155,17 +151,12 @@ export default function RaceTrack() {
 
     setTimeout(() => {
         if (newScores.p1 >= 2 || newScores.p2 >= 2) {
-            // --- FIN DE LA SERIE ---
             setSeriesWinner(winnerName);
-            
-            // Guardamos en historial
-            // Actualizamos los clicks totales sumando lo que hicieron en la serie
-            const finalP1 = { ...racers[0], clicks: (racers[0].clicks || 0) }; // Solo visual
+            const finalP1 = { ...racers[0], clicks: (racers[0].clicks || 0) }; 
             const finalP2 = { ...racers[1], clicks: (racers[1].clicks || 0) };
             
             setHistory(prev => [finalP1, finalP2, ...prev].slice(0, 5));
             
-            // BORRAMOS LA CARRERA ACTIVA -> ESTO RESETEA LOS TELÉFONOS
             setTimeout(() => { 
                 remove(ref(db, 'active_race')); 
                 setIsRacing(false); 
@@ -173,17 +164,13 @@ export default function RaceTrack() {
             }, 8000);
 
         } else {
-            // --- PIT STOP (TIEMPO DE CLICKS) ---
             triggerPitStop();
         }
     }, 3000);
   };
 
   const triggerPitStop = () => {
-    // AVISAMOS A TELÉFONOS: ¡HORA DE CLICKEAR!
     set(ref(db, 'active_race/status'), 'PIT_STOP');
-    
-    // Reseteamos contadores de sesión para que empiecen de 0 esta ronda
     set(ref(db, 'active_race/p1/sessionClicks'), 0);
     set(ref(db, 'active_race/p2/sessionClicks'), 0);
 
@@ -197,21 +184,32 @@ export default function RaceTrack() {
             clearInterval(pitInterval);
             setPitStopTimer(null);
             setRound(prev => prev + 1);
-            startRound(racers[0], racers[1]); // Volvemos a correr
+            startRound(racers[0], racers[1]); 
         }
     }, 1000);
   };
 
-  // --- VISTA LOBBY (Igual que antes) ---
+  // --- SAFEGUARD: PANTALLA DE CARGA SI NO HAY DATOS ---
+  // Esto evita el "pantallazo blanco" si racers se vacía por error
+  const isLoadingRace = isRacing && racers.length < 2;
+
+  if (isLoadingRace) {
+      return (
+        <div className="w-screen h-screen bg-black flex items-center justify-center">
+            <h1 className="text-orange-500 animate-pulse font-black text-4xl">INICIANDO MOTORES...</h1>
+        </div>
+      );
+  }
+
+  // --- VISTA LOBBY ---
   if (!isRacing) {
     const p1 = racers[0];
-    const qrUrl = "https://autos-plum.vercel.app/"; // Pon tu URL aquí
+    const qrUrl = "https://autos-plum.vercel.app/";
 
     return (
       <div className="w-screen h-screen bg-black flex items-center border-y-4 border-orange-600 px-4 overflow-hidden relative font-sans">
          <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
 
-         {/* IZQUIERDA: P1 + QR */}
          <div className="z-10 w-[40%] h-[90%] flex mr-4">
             <div className={`flex-grow h-full flex items-center bg-gray-900 border border-orange-500 rounded-l-lg p-2 gap-2 shadow-lg overflow-hidden ${!p1 ? 'justify-center' : ''}`}>
                {p1 ? (
@@ -235,7 +233,6 @@ export default function RaceTrack() {
             </div>
          </div>
 
-         {/* CENTRO: HISTORIAL */}
          <div className="z-10 w-[25%] h-[90%] flex flex-col bg-gray-900/50 border border-gray-700 rounded-lg p-2 mr-4 overflow-hidden">
              <h3 className="text-gray-400 text-[10px] font-bold uppercase tracking-widest border-b border-gray-700 pb-1 mb-1 text-center">Salón de la Fama</h3>
              {history.length === 0 ? <div className="h-full flex items-center justify-center text-gray-600 text-xs italic">Sin registros</div> : (
@@ -249,7 +246,6 @@ export default function RaceTrack() {
              )}
          </div>
 
-         {/* DERECHA: P2 */}
          <div className="z-10 flex-grow h-[90%] flex items-center justify-center border-2 border-gray-800 border-dashed rounded-lg bg-gray-900/30">
             <div className="text-gray-600 font-bold animate-pulse text-lg tracking-widest text-center px-2">ESPERANDO RIVAL</div>
          </div>
@@ -258,11 +254,12 @@ export default function RaceTrack() {
   }
 
   // --- VISTA CARRERA ---
+  // AQUI ES DONDE OCURRÍA EL ERROR: SI racers[0] NO EXISTÍA, CRASHEABA.
+  // AHORA TENEMOS EL SAFEGUARD 'isLoadingRace' ARRIBA QUE LO EVITA.
   return (
     <div className="relative w-screen h-screen bg-neutral-900 overflow-hidden border-y-4 border-orange-600 flex flex-col">
        <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle,_#333_1px,_transparent_1px)] [background-size:20px_20px]"></div>
        
-       {/* PANTALLA DE PIT STOP / BOOST */}
        {pitStopTimer && (
           <div className="absolute inset-0 z-40 bg-red-600/90 flex flex-col items-center justify-center animate-pulse">
              <h1 className="text-yellow-300 font-black text-[15vh] uppercase leading-none">¡BOOST!</h1>
@@ -271,21 +268,35 @@ export default function RaceTrack() {
           </div>
        )}
 
-       {/* MARCADOR */}
        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-0 opacity-30 text-[10vh] font-black text-white flex gap-10">
         <span>{scores.p1}</span><span>-</span><span>{scores.p2}</span>
       </div>
 
+      {/* CARRIL 1 - PROTEGIDO CON OPTIONAL CHAINING (?.) */}
       <div className="relative h-1/2 w-full border-b border-dashed border-gray-600 flex items-end">
         <div ref={car1Ref} className="absolute left-0 h-[85%] w-auto will-change-transform z-10 pl-2 pb-1">
-           <img src={racers[0].image} className="h-full w-auto object-contain drop-shadow-2xl" />
-           <div className="absolute -top-1 left-2 bg-orange-600/90 text-white text-[10px] font-bold px-2 rounded-sm skew-x-[-10deg] whitespace-nowrap overflow-hidden max-w-[150px] truncate">{racers[0].name} {scores.p1>=1 && '★'}</div>
+           {racers[0] && (
+             <>
+               <img src={racers[0].image} className="h-full w-auto object-contain drop-shadow-2xl" />
+               <div className="absolute -top-1 left-2 bg-orange-600/90 text-white text-[10px] font-bold px-2 rounded-sm skew-x-[-10deg] whitespace-nowrap overflow-hidden max-w-[150px] truncate">
+                  {racers[0].name} {scores.p1>=1 && '★'}
+               </div>
+             </>
+           )}
         </div>
       </div>
+
+      {/* CARRIL 2 - PROTEGIDO CON OPTIONAL CHAINING (?.) */}
       <div className="relative h-1/2 w-full flex items-end">
         <div ref={car2Ref} className="absolute left-0 h-[85%] w-auto will-change-transform z-10 pl-2 pb-1">
-           <img src={racers[1].image} className="h-full w-auto object-contain drop-shadow-2xl" />
-           <div className="absolute -top-1 left-2 bg-blue-600/90 text-white text-[10px] font-bold px-2 rounded-sm skew-x-[-10deg] whitespace-nowrap overflow-hidden max-w-[150px] truncate">{racers[1].name} {scores.p2>=1 && '★'}</div>
+           {racers[1] && (
+             <>
+                <img src={racers[1].image} className="h-full w-auto object-contain drop-shadow-2xl" />
+                <div className="absolute -top-1 left-2 bg-blue-600/90 text-white text-[10px] font-bold px-2 rounded-sm skew-x-[-10deg] whitespace-nowrap overflow-hidden max-w-[150px] truncate">
+                   {racers[1].name} {scores.p2>=1 && '★'}
+                </div>
+             </>
+           )}
         </div>
       </div>
 
